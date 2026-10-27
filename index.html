@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Primate Studio</title>
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22c3-9 7-14 12-14s9 5 12 14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="11.5" cy="17" r="2" fill="currentColor"/><circle cx="20.5" cy="17" r="2" fill="currentColor"/><path d="M12 23h8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <div>
+        <div class="title">Primate Studio</div>
+        <div id="ws-path" class="subtitle"></div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="llm-pill" class="pill">model …</span>
+      <button id="app-de" class="app-btn" title="Primate DE: libraries, schematics, symbols, Verilog">Primate DE</button>
+      <button id="app-probe" class="app-btn" title="PrimeProbe: waveforms and measurements">PrimeProbe</button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <!-- ======================================================== sidebar -->
+    <aside class="sidebar">
+      <div class="side-section">
+        <div class="side-head"><span>Sessions</span><button id="new-session" class="mini" title="New chat">+ New</button></div>
+        <div id="session-list" class="session-list"></div>
+      </div>
+      <div class="side-section">
+        <div class="side-head"><span>Teams</span></div>
+        <div id="team-list" class="team-list"></div>
+      </div>
+      <div class="side-section grow">
+        <div class="side-head"><span>Memory</span><button id="mem-add" class="mini" title="Add a project memory">+</button></div>
+        <div id="memory-list" class="memory-list"></div>
+      </div>
+    </aside>
+
+    <!-- ======================================================== chat -->
+    <main class="chat">
+      <div id="chat-log" class="chat-log"></div>
+      <form id="composer" class="composer">
+        <div id="hint" class="hint" hidden></div>
+        <textarea id="input" rows="1" placeholder="Message the team…  (@team to address one, / for commands)" aria-label="Message"></textarea>
+        <div class="composer-bar">
+          <label class="muted small">to <select id="team-select" aria-label="Default team"></select></label>
+          <label class="muted small"><input id="think" type="checkbox"> think</label>
+          <span class="spacer"></span>
+          <span id="status" class="muted small"></span>
+          <button id="send" type="submit" class="primary">Send</button>
+        </div>
+      </form>
+    </main>
+
+    <!-- ======================================================== app pane -->
+    <section id="app-pane" class="app-pane" hidden>
+      <div class="app-tabs">
+        <div id="app-tab-list" class="app-tab-list"></div>
+        <span class="spacer"></span>
+        <button id="app-max" class="mini" title="Maximize / restore">⤢</button>
+        <button id="app-close" class="mini" title="Close the app pane">✕</button>
+      </div>
+      <div id="de" class="app de" hidden>
+        <div class="de-lib">
+          <div class="side-head"><span>Libraries</span>
+            <span><button id="de-new-lib" class="mini" title="New library">+ Lib</button><button id="de-new-cell" class="mini" title="New cell">+ Cell</button></span></div>
+          <div id="de-tree" class="de-tree"></div>
+        </div>
+        <div class="de-main">
+          <div id="de-toolbar" class="de-toolbar"></div>
+          <div id="de-body" class="de-body"></div>
+        </div>
+      </div>
+      <div id="probe" class="app probe" hidden></div>
+    </section>
+  </div>
+
+  <div id="modal" class="modal" hidden><div class="modal-card"></div></div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="config.js"></script>
+  <script src="studio.js"></script>
+  <script src="de.js"></script>
+  <script src="probe.js"></script>
+</body>
+</html>
