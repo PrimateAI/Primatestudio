@@ -45,8 +45,11 @@
       <div id="chat-log" class="chat-log"></div>
       <form id="composer" class="composer">
         <div id="hint" class="hint" hidden></div>
+        <div id="attachments" class="attachments" hidden></div>
+        <input id="file-input" type="file" multiple hidden>
         <textarea id="input" rows="1" placeholder="Message the team…  (@team to address one, / for commands)" aria-label="Message"></textarea>
         <div class="composer-bar">
+          <button id="attach" type="button" class="mini" title="Attach files or images (you can also drop or paste them)">📎 Attach</button>
           <label class="muted small">to <select id="team-select" aria-label="Default team"></select></label>
           <label class="muted small"><input id="think" type="checkbox"> think</label>
           <span class="spacer"></span>

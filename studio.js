@@ -309,12 +309,88 @@ function welcome() {
 function scrollDown() { const l = $('#chat-log'); l.scrollTop = l.scrollHeight; }
 
 // a user message as seen on the current screen: "to X" where it was typed, "from <screen>" elsewhere
-function userBubble(text, team, where = P.screen) {
+function userBubble(text, team, where = P.screen, atts = []) {
   $('.welcome')?.remove();
   const label = where !== P.screen ? `@${team} from ${where === 'main' ? 'the session chat' : teamOf(where).name + "'s chat"}`
     : P.screen !== 'main' && team === P.screen ? null : 'to ' + teamOf(team).name;
-  $('#chat-log').append(h('div', { class: 'msg-user' }, label ? h('span', { class: 'to' }, label) : null, text));
+  if (atts?.length && text === '(see the attached files)') text = '';
+  $('#chat-log').append(h('div', { class: 'msg-user' }, label ? h('span', { class: 'to' }, label) : null, text,
+    atts?.length ? h('div', { class: 'msg-atts' }, atts.map(attachmentView)) : null));
 }
+
+// ---------------------------------------------------------------- attachments
+// Files wait in P.pending until Send; each can also go to the paper library (PDFs) and, with a
+// label, to the training dataset (uploads.py on the engine).
+P.pending = [];
+const fileUrl = att => `${API}/api/upload?file=${encodeURIComponent(att.file)}`;
+const typeOf = name => /\.pdf$/i.test(name) ? 'pdf' : /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name) ? 'image' : 'text';
+const kb = n => n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`;
+
+function attachmentView(att) {
+  const tags = [att.library ? 'library' : null, att.dataset ? 'dataset' : null].filter(Boolean).join(' · ');
+  if (att.type === 'image') return h('a', { class: 'att img', href: fileUrl(att), target: '_blank', title: att.name },
+    h('img', { src: fileUrl(att), alt: att.name }), tags ? h('span', { class: 'tag' }, tags) : null);
+  return h('a', { class: 'att', href: fileUrl(att), target: '_blank', title: att.name },
+    att.type === 'pdf' ? '📕 ' : '📄 ', att.name, h('span', { class: 'muted' }, ` ${kb(att.size)}${tags ? ' · ' + tags : ''}`));
+}
+
+function addFiles(list) {
+  for (const file of list) {
+    if (file.size > 50 * 1024 * 1024) { toast(`${file.name} is larger than 50 MB`); continue; }
+    const name = file.name && file.name !== 'image.png' ? file.name : `pasted-${Date.now()}.png`;
+    P.pending.push({ file, name, type: typeOf(name), library: typeOf(name) === 'pdf', dataset: null });
+  }
+  renderPending();
+}
+
+function renderPending() {
+  const box = $('#attachments');
+  box.hidden = !P.pending.length;
+  box.replaceChildren(...P.pending.map((p, i) => h('div', { class: 'chip' },
+    p.type === 'image' ? h('img', { src: p.url ||= URL.createObjectURL(p.file), alt: '' }) : h('span', {}, p.type === 'pdf' ? '📕' : '📄'),
+    h('span', { class: 'n', title: p.name }, p.name), h('span', { class: 'muted small' }, kb(p.file.size)),
+    p.type === 'pdf' ? h('button', { type: 'button', class: 'mini' + (p.library ? ' on' : ''), title: 'Also file it in the paper library (the Lead cites its passages)',
+      onclick: () => { p.library = !p.library; renderPending(); } }, '📚 library') : null,
+    h('button', { type: 'button', class: 'mini' + (p.dataset ? ' on' : ''), title: 'Also save it to the training dataset with a label',
+      onclick: () => datasetDialog(p) }, p.dataset ? `🧪 ${p.dataset.block} · ${p.dataset.label}` : '🧪 dataset'),
+    h('button', { type: 'button', class: 'x', title: 'Remove', onclick: () => { P.pending.splice(i, 1); renderPending(); } }, '✕'))));
+}
+
+async function datasetDialog(p) {
+  const ds = P.state.dataset, cur = p.dataset || {};
+  const guess = p.type === 'image' ? 'schematic' : p.type === 'pdf' ? 'paper' : /\.(sp|spice|cir|net|scs|cdl)$/i.test(p.name) ? 'netlist' : 'other';
+  const sel = (opts, v) => h('select', {}, opts.map(o => h('option', { value: o, selected: o === v }, o)));
+  const block = sel(ds.blocks, cur.block || 'other'), kind = sel(ds.kinds, cur.kind || guess), label = sel(ds.labels, cur.label || 'unknown');
+  const notes = h('textarea', { rows: 3, placeholder: 'What it is, the spec it meets or misses, results…' }, cur.notes || '');
+  const ok = await modal(`Training dataset: ${p.name}`, [h('label', { class: 'kv' }, 'block', block), h('label', { class: 'kv' }, 'kind', kind),
+    h('label', { class: 'kv' }, 'label', label), notes,
+    h('p', { class: 'muted small' }, 'Saved with your label for training AMSChat. Remove it from the dataset by leaving this form with "Not in dataset".')],
+  'Save label', 'Not in dataset');
+  p.dataset = ok ? { block: block.value, kind: kind.value, label: label.value, notes: notes.value } : null;
+  renderPending();
+}
+
+async function uploadAll(files, message) {
+  const out = [];
+  for (const p of files) {
+    const q = new URLSearchParams({ session: P.sid, name: p.name, message: message.slice(0, 500) });
+    if (p.library) q.set('library', '1');
+    if (p.dataset) q.set('dataset', JSON.stringify(p.dataset));
+    const r = await fetch(`${API}/api/upload?${q}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: p.file });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`${p.name}: ${data.error || 'upload failed (HTTP ' + r.status + ')'}`);
+    out.push(data);
+  }
+  return out;
+}
+
+$('#attach').addEventListener('click', () => $('#file-input').click());
+$('#file-input').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+$('#input').addEventListener('paste', e => { if (e.clipboardData?.files?.length) { e.preventDefault(); addFiles(e.clipboardData.files); } });
+const chatEl = $('main.chat');
+chatEl.addEventListener('dragover', e => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); chatEl.classList.add('drop'); } });
+chatEl.addEventListener('dragleave', e => { if (!chatEl.contains(e.relatedTarget)) chatEl.classList.remove('drop'); });
+chatEl.addEventListener('drop', e => { if (!e.dataTransfer?.files?.length) return; e.preventDefault(); chatEl.classList.remove('drop'); addFiles(e.dataTransfer.files); });
 
 function handoffBubble(m) {
   $('.welcome')?.remove();
@@ -444,7 +520,7 @@ function replay(s) {
   for (const m of shown) {
     // work a team did on a task handed to it is its own top-level turn in its own chat
     const depth = m.depth && P.screen === m.team ? 0 : (m.depth || 0);
-    if (m.role === 'user') { R.turns = []; userBubble(m.content, m.team, m.screen || 'main'); }
+    if (m.role === 'user') { R.turns = []; userBubble(m.content, m.team, m.screen || 'main', m.attachments); }
     else if (m.role === 'handoff') { R.turns = []; handoffBubble(m); }
     else if (m.role === 'system_note') note(m.content);
     else if (m.role === 'assistant') {
@@ -463,14 +539,25 @@ function replay(s) {
 // ---------------------------------------------------------------- send
 async function send(text) {
   text = (text ?? $('#input').value).trim();
-  if (!text || P.controller) return;
+  const files = text.startsWith('/') ? [] : P.pending;
+  if ((!text && !files.length) || P.controller || P.uploading) return;
   if (!P.sid) await newSession();
+  let atts = [];
+  if (files.length) {
+    $('#status').textContent = `Uploading ${files.length} file${files.length > 1 ? 's' : ''}…`;
+    P.uploading = true;
+    try { atts = await uploadAll(files, text); }
+    catch (err) { toast(err.message, 6000); $('#status').textContent = ''; return; }
+    finally { P.uploading = false; }
+    P.pending = [];
+    renderPending();
+  }
   $('#input').value = '';
   autosize();
   hideHint();
   const m = text.match(/^@([a-z-]+)\s/);
   const here = P.screen === 'main' ? P.session.team || 'lead' : P.screen;
-  if (!text.startsWith('/')) userBubble(m ? text.slice(m[0].length) : text, m ? m[1] : here);
+  if (!text.startsWith('/')) userBubble(m ? text.slice(m[0].length) : text, m ? m[1] : here, P.screen, atts);
   R.turns = [];
   P.liveScreen = P.screen;
   P.controller = new AbortController();
@@ -478,7 +565,8 @@ async function send(text) {
   $('#send').classList.remove('primary');
   try {
     const r = await fetch(API + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: P.controller.signal,
-      body: JSON.stringify({ session: P.sid, text, think: $('#think').checked, open: DE.currentLabel(), screen: P.screen }) });
+      body: JSON.stringify({ session: P.sid, text, think: $('#think').checked, open: DE.currentLabel(), screen: P.screen,
+        attachments: atts }) });
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = '';
     for (;;) {
