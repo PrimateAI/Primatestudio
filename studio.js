@@ -458,7 +458,9 @@ async function pollLLM() {
       h('h2', {}, "Can't reach your Primate Studio engine"),
       h('p', { class: 'muted' }, API
         ? `This page talks to the engine on your PC at ${API}, which only devices on your Tailscale network can reach. ` +
-          'Turn Tailscale on here, and check that the PC is on and Primate Studio is running.'
+          'Turn Tailscale on here, and check that the PC is on and Primate Studio is running. Chrome and Edge also ' +
+          'ask once whether this site may access devices on your local network: choose Allow (or set it in the ' +
+          'site settings, the icon left of the address).'
         : 'The Primate Studio server is not answering. Start it from the Primate Studio icon.'),
       h('p', { class: 'muted small' }, err.message),
       h('div', { class: 'suggest' }, h('button', { onclick: () => location.reload() }, 'Retry'))));
