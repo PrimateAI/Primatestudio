@@ -137,24 +137,57 @@ $('#app-de').addEventListener('click', () => DE.openLauncher());
 $('#app-probe').addEventListener('click', () => Probe.open(null));
 
 // ---------------------------------------------------------------- sidebar
+// Sessions: block sessions (tied to one circuit) carry a ▣ and sit under the session that started
+// them; a spinner marks one that is working on its own.
 async function loadSessions() {
   const list = await api('/api/sessions');
-  $('#session-list').replaceChildren(...list.map(s => h('button', {
-    class: 'session' + (s.id === P.sid ? ' active' : ''), title: s.title, onclick: () => openSession(s.id) },
-    h('span', { class: 'dot', style: { background: teamOf(s.team).color } }), h('span', { class: 't' }, s.title),
+  const ids = new Set(list.map(s => s.id)), kids = {};
+  for (const s of list) if (s.parent && ids.has(s.parent)) (kids[s.parent] ||= []).push(s);
+  const row = (s, nested) => h('button', {
+    class: 'session' + (s.id === P.sid ? ' active' : '') + (nested ? ' nested' : ''),
+    title: s.block ? `Block session: ${s.block.lib}/${s.block.cell}` : s.title, onclick: () => openSession(s.id) },
+    s.running ? h('span', { class: 'spin', title: 'working' }) : h('span', { class: 'dot', style: { background: teamOf(s.team).color } }),
+    s.block ? h('span', { class: 'blk', title: `${s.block.lib}/${s.block.cell}` }, '▣') : null,
+    h('span', { class: 't' }, s.title),
     h('button', { class: 'x', title: 'Delete this chat', onclick: async e => {
       e.stopPropagation();
       if (!await modal('Delete chat?', h('p', {}, s.title), 'Delete')) return;
       await api('/api/sessions/delete', { id: s.id });
       if (s.id === P.sid) await newSession(); else loadSessions();
-    } }, '✕'))));
+    } }, '✕'));
+  const rows = [];
+  for (const s of list) {
+    if (s.parent && ids.has(s.parent)) continue;
+    rows.push(row(s, false), ...(kids[s.id] || []).map(k => row(k, true)));
+  }
+  $('#session-list').replaceChildren(...rows);
   return list;
 }
+
+// A session for one block or circuit (from Primate DE's library tree or menu): its team, model and
+// an optional first task, which it starts on at once.
+async function newBlockSession(lib, cell) {
+  const team = h('select', {}, P.state.teams.map(t => h('option', { value: t.id, selected: t.id === 'analog-schematic' }, t.name)));
+  const llm = h('select', {}, h('option', { value: '' }, 'team default'), (P.llms?.llms || []).map(m => h('option', { value: m.id }, `${m.name} (${m.status})`)));
+  const brief = h('textarea', { rows: 4, placeholder: 'Optional first task, e.g. "Size the tail for 4 mA and check the swing at tt"; the session starts on it right away' });
+  if (!await modal(`New session for ${lib}/${cell}`, [h('label', { class: 'kv' }, 'team', team), h('label', { class: 'kv' }, 'model', llm), brief], 'Start')) return;
+  try {
+    const s = await api('/api/sessions', { team: team.value, block: { lib, cell }, llm: llm.value || undefined,
+      brief: brief.value.trim() || undefined, parent: undefined });
+    await openSession(s.id);
+    if (brief.value.trim()) toast(`The session is working on it; it shows ⟳ until done.`);
+  } catch (err) { toast(err.message, 6000); }
+}
+window.Studio = { newBlockSession };
+$('#llm-menu').addEventListener('click', e => { e.stopPropagation(); modelMenu(); });
+$('#llm-pill').addEventListener('click', e => { e.stopPropagation(); modelMenu(); });
+document.addEventListener('click', e => { if (!e.target.closest?.('#llm-pop')) $('#llm-pop').hidden = true; });
 
 // ---------------------------------------------------------------- screens
 // A message shows on the screen it was typed on; a member's chat also shows everything addressed to
 // that member (@tags from other screens, tasks handed to it), from where its chat was last cleared.
 function onScreen(m, i, scr, s = P.session) {
+  if (m.role === 'proposal_status') return false;
   const where = m.screen || 'main';
   if (scr === 'main') return where === 'main' && m.role !== 'handoff';
   if (i < (s.cleared?.[scr] || 0)) return false;
@@ -209,31 +242,111 @@ function renderTeams() {
     h('span', { class: 'muted small' }, main
       ? ` · answered by ${teamOf(cur).name}; @team brings one team in, and only that team sees the message`
       : ' · private chat; this team sees only what is sent here, @tagged to it, or handed to it'));
-  $('#input').placeholder = main ? 'Message the session…  (@team to address one, / for commands)'
-    : `Message ${t.name}…  (@team to send to another team instead)`;
+  $('#input').placeholder = main ? 'Message the session…  (@team to address one, @ for files and cells, / for commands)'
+    : `Message ${t.name}…  (@team to send to another team instead, @ for files and cells)`;
+  renderModel();
 }
 
+// ---------------------------------------------------------------- model menu
+// Like Claude's model menu: the session's choice wins, else the answering team's default, else the
+// studio default. Models are the local llama-servers listed in studio.json.
+function effectiveModel() {
+  const st = P.llms;
+  if (!st) return null;
+  const team = P.screen === 'main' ? P.session?.team || 'lead' : P.screen;
+  const id = P.session?.llm || st.team_llms[team] || st.default;
+  const why = P.session?.llm ? 'this session' : st.team_llms[team] ? `${teamOf(team).name}'s default` : 'studio default';
+  return { m: st.llms.find(x => x.id === id) || st.llms[0], why, team };
+}
+
+function renderModel() {
+  const e = effectiveModel(), b = $('#llm-menu');
+  if (!e || !b) return;
+  b.replaceChildren(h('span', { class: 'dot ' + e.m.status }), e.m.name, h('span', { class: 'muted' }, ' ▾'));
+  b.title = `${e.m.name} (${e.m.status}), from ${e.why}. Click to choose the model for this session.`;
+}
+
+async function loadLLMs() {
+  try { P.llms = await api('/api/llms'); renderModel(); } catch { /* engine offline */ }
+}
+
+function modelMenu() {
+  const pop = $('#llm-pop');
+  if (!pop.hidden) { pop.hidden = true; return; }
+  const e = effectiveModel();
+  const pick = async id => {
+    pop.hidden = true;
+    try { P.session = { ...P.session, ...(await api('/api/sessions/llm', { session: P.sid, llm: id })) }; renderModel(); }
+    catch (err) { toast(err.message, 6000); }
+  };
+  pop.replaceChildren(h('div', { class: 'pop-head' }, 'Model for this session'),
+    ...P.llms.llms.map(m => h('button', { type: 'button', class: 'pop-item' + (m.id === e.m.id ? ' on' : ''), onclick: () => pick(m.id),
+      title: m.note || '' }, h('span', { class: 'dot ' + m.status }), h('span', { class: 't' }, m.name),
+      h('span', { class: 'muted small' }, m.status === 'online' ? m.file || 'online' : m.status), m.id === e.m.id ? ' ✓' : null)),
+    h('button', { type: 'button', class: 'pop-item' + (P.session?.llm ? '' : ' on'), onclick: () => pick(null) },
+      h('span', { class: 't' }, `Use the team default`), h('span', { class: 'muted small' }, P.session?.llm ? '' : 'in use')),
+    h('button', { type: 'button', class: 'pop-item link', onclick: () => { pop.hidden = true; teamModelsDialog(); } }, 'Team defaults…'));
+  pop.hidden = false;
+}
+
+async function teamModelsDialog() {
+  const st = await api('/api/llms');
+  const opts = (sel, extra) => [extra ? h('option', { value: '' }, extra) : null,
+    ...st.llms.map(m => h('option', { value: m.id, selected: m.id === sel }, `${m.name} (${m.status})`))];
+  const def = h('select', {}, opts(st.default));
+  const rows = P.state.teams.map(t => [t.id, h('select', {}, opts(st.team_llms[t.id], `studio default`))]);
+  rows.forEach(([id, sel]) => { sel.value = st.team_llms[id] || ''; });
+  if (!await modal('Models per team', [h('label', { class: 'kv' }, 'studio default', def),
+    ...rows.map(([id, sel]) => h('label', { class: 'kv' }, teamOf(id).name, sel)),
+    h('p', { class: 'muted small' }, 'A session can still pick its own model from the menu in the message box. Qwen3-14B and the 9B ' +
+      'do not fit in memory together on this PC: start the 14B from the Start menu first.')], 'Save')) return;
+  try {
+    await api('/api/llms/default', { llm: def.value });
+    for (const [id, sel] of rows) if ((st.team_llms[id] || '') !== sel.value) await api('/api/llms/team', { team: id, llm: sel.value || null });
+    await loadLLMs();
+  } catch (err) { toast(err.message, 6000); }
+}
+
+// Memory panel. "Learned from chats" is the unified memory the local model fills quietly after each
+// turn (learner.py); every team reads it. The designer can pause learning, edit or delete an entry,
+// or wipe it all. Everything stays on this PC.
 async function loadMemory() {
-  const scopes = await api('/api/memory');
+  const [scopes, learning] = await Promise.all([api('/api/memory'), api('/api/learning').catch(() => ({ enabled: false }))]);
   const box = $('#memory-list');
   box.replaceChildren();
-  let any = false;
+  const learned = scopes.learned || [];
+  box.append(h('div', { class: 'mem-scope learned' }, 'Learned from chats',
+    h('label', { class: 'switch', title: 'Learn from chats: after each turn the local model files lasting facts here, quietly' },
+      h('input', { type: 'checkbox', checked: learning.enabled, onchange: async e => {
+        await api('/api/learning', { enabled: e.target.checked }); toast(e.target.checked ? 'Learning from chats is on' : 'Learning paused');
+      } }), learning.enabled ? ' on' : ' paused'),
+    learned.length ? h('button', { class: 'mini', title: 'Delete everything learned from chats', onclick: async () => {
+      if (!await modal('Wipe learned memory?', h('p', {}, `Deletes all ${learned.length} entries learned from chats. Your own and the teams' saved memories stay.`), 'Wipe')) return;
+      await api('/api/memory/wipe', { scope: 'learned' }); loadMemory();
+    } }, 'wipe') : null));
+  if (!learned.length) box.append(h('p', { class: 'muted small' }, learning.enabled
+    ? 'Nothing learned yet. Lasting facts from your chats will show here.' : 'Learning is paused.'));
   for (const [scope, entries] of Object.entries(scopes)) {
     if (!entries.length) continue;
-    any = true;
-    box.append(h('div', { class: 'mem-scope' }, scope.startsWith('team:') ? teamOf(scope.slice(5)).name : scope));
+    if (scope !== 'learned') box.append(h('div', { class: 'mem-scope' }, scope.startsWith('team:') ? teamOf(scope.slice(5)).name : scope));
     for (const e of entries) box.append(h('button', { class: 'mem', title: e.description, onclick: () => showMemory(scope, e.name) },
       e.name, h('span', { class: 'd' }, e.description)));
   }
-  if (!any) box.append(h('p', { class: 'muted small' }, 'No memories yet. Teams save decisions here; you can too with /remember.'));
 }
 
 async function showMemory(scope, name) {
   const m = await api(`/api/memory/read?scope=${encodeURIComponent(scope)}&name=${encodeURIComponent(name)}`);
-  const ok = await modal(`${scope} / ${name}`, [h('p', { class: 'muted small' }, `${m.type || 'fact'} · ${m.team || ''} · ${m.updated || ''}`),
-    h('p', {}, h('strong', {}, m.description)), h('pre', { class: 'mono', style: { whiteSpace: 'pre-wrap' } }, m.body)],
-    'Delete', 'Close');
-  if (ok) { await api('/api/memory/delete', { scope, name }); loadMemory(); toast('Memory deleted'); }
+  const desc = h('input', { type: 'text', value: m.description || '' });
+  const body = h('textarea', { rows: 8 }, m.body);
+  let remove = false;
+  const del = h('button', { class: 'mini', onclick: () => { remove = true; $('#modal .btns button')?.click(); } }, 'Delete');
+  const ok = await modal(`${scope === 'learned' ? 'Learned' : scope} / ${name}`, [
+    h('p', { class: 'muted small' }, `${m.type || 'fact'} · ${m.team || ''} · ${m.updated || ''}`), desc, body, del], 'Save', 'Close');
+  try {
+    if (remove) { await api('/api/memory/delete', { scope, name }); toast('Memory deleted'); }
+    else if (ok) { await api('/api/memory', { scope, name, description: desc.value, body: body.value, type: m.type }); toast('Saved'); }
+  } catch (err) { toast(err.message, 6000); }
+  loadMemory();
 }
 
 $('#mem-add').addEventListener('click', async () => {
@@ -314,8 +427,21 @@ function userBubble(text, team, where = P.screen, atts = []) {
   const label = where !== P.screen ? `@${team} from ${where === 'main' ? 'the session chat' : teamOf(where).name + "'s chat"}`
     : P.screen !== 'main' && team === P.screen ? null : 'to ' + teamOf(team).name;
   if (atts?.length && text === '(see the attached files)') text = '';
-  $('#chat-log').append(h('div', { class: 'msg-user' }, label ? h('span', { class: 'to' }, label) : null, text,
+  $('#chat-log').append(h('div', { class: 'msg-user' }, label ? h('span', { class: 'to' }, label) : null, ...withMentions(text),
     atts?.length ? h('div', { class: 'msg-atts' }, atts.map(attachmentView)) : null));
+}
+
+// @references and [Image #N] tags in a sent message, shown as chips
+function withMentions(text) {
+  const out = [];
+  let last = 0;
+  for (const m of String(text).matchAll(/@"[^"]+"|@[^\s@"]+|\[Image #\d+\]/g)) {
+    if (m.index === 0 && P.state.teams.some(t => '@' + t.id === m[0])) continue;
+    out.push(text.slice(last, m.index), h('span', { class: 'mention' }, m[0]));
+    last = m.index + m[0].length;
+  }
+  out.push(text.slice(last));
+  return out;
 }
 
 // ---------------------------------------------------------------- attachments
@@ -335,11 +461,26 @@ function attachmentView(att) {
 }
 
 function addFiles(list) {
+  const el = $('#input');
   for (const file of list) {
     if (file.size > 50 * 1024 * 1024) { toast(`${file.name} is larger than 50 MB`); continue; }
     const name = file.name && file.name !== 'image.png' ? file.name : `pasted-${Date.now()}.png`;
-    P.pending.push({ file, name, type: typeOf(name), library: typeOf(name) === 'pdf', dataset: null });
+    const p = { file, name, type: typeOf(name), library: typeOf(name) === 'pdf', dataset: null };
+    if (p.type === 'image') {                    // like Claude Code: a [Image #N] tag where it was pasted
+      p.tag = `[Image #${P.pending.filter(x => x.tag).length + 1}]`;
+      const at = el.selectionStart ?? el.value.length;
+      el.value = el.value.slice(0, at) + p.tag + ' ' + el.value.slice(at);
+      el.selectionStart = el.selectionEnd = at + p.tag.length + 1;
+    }
+    P.pending.push(p);
   }
+  autosize();
+  renderPending();
+}
+
+function removePending(i) {
+  const [p] = P.pending.splice(i, 1);
+  if (p?.tag) $('#input').value = $('#input').value.replace(p.tag + ' ', '').replace(p.tag, '');
   renderPending();
 }
 
@@ -348,12 +489,12 @@ function renderPending() {
   box.hidden = !P.pending.length;
   box.replaceChildren(...P.pending.map((p, i) => h('div', { class: 'chip' },
     p.type === 'image' ? h('img', { src: p.url ||= URL.createObjectURL(p.file), alt: '' }) : h('span', {}, p.type === 'pdf' ? '📕' : '📄'),
-    h('span', { class: 'n', title: p.name }, p.name), h('span', { class: 'muted small' }, kb(p.file.size)),
+    h('span', { class: 'n', title: p.name }, p.tag ? `${p.tag} ${p.name}` : p.name), h('span', { class: 'muted small' }, kb(p.file.size)),
     p.type === 'pdf' ? h('button', { type: 'button', class: 'mini' + (p.library ? ' on' : ''), title: 'Also file it in the paper library (the Lead cites its passages)',
       onclick: () => { p.library = !p.library; renderPending(); } }, '📚 library') : null,
     h('button', { type: 'button', class: 'mini' + (p.dataset ? ' on' : ''), title: 'Also save it to the training dataset with a label',
       onclick: () => datasetDialog(p) }, p.dataset ? `🧪 ${p.dataset.block} · ${p.dataset.label}` : '🧪 dataset'),
-    h('button', { type: 'button', class: 'x', title: 'Remove', onclick: () => { P.pending.splice(i, 1); renderPending(); } }, '✕'))));
+    h('button', { type: 'button', class: 'x', title: 'Remove', onclick: () => removePending(i) }, '✕'))));
 }
 
 async function datasetDialog(p) {
@@ -379,7 +520,7 @@ async function uploadAll(files, message) {
     const r = await fetch(`${API}/api/upload?${q}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: p.file });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(`${p.name}: ${data.error || 'upload failed (HTTP ' + r.status + ')'}`);
-    out.push(data);
+    out.push(p.tag ? { ...data, tag: p.tag } : data);
   }
   return out;
 }
@@ -398,10 +539,48 @@ function handoffBubble(m) {
     h('span', { class: 'to' }, `handed off by ${teamOf(m.from).name}`), m.task));
 }
 
-function turnBlock(team, depth) {
+// A Lead's offer of a session for one block, started with a click; status comes from the session's
+// proposal_status notes.
+function proposalCard(p, status) {
+  const card = h('div', { class: 'proposal' });
+  const draw = st => card.replaceChildren(
+    h('div', { class: 'p-head' }, h('span', { class: 'blk' }, '▣'), h('strong', {}, `New session: ${p.title}`),
+      h('span', { class: 'muted small' }, ` · ${p.block.lib}/${p.block.cell} · ${teamOf(p.target_team).name}`)),
+    h('details', {}, h('summary', { class: 'muted small' }, 'brief'), h('div', { class: 'small' }, p.brief)),
+    st?.status === 'started' ? h('div', { class: 'row' }, h('span', { class: 'muted small' }, 'Started.'),
+      h('button', { class: 'mini', onclick: () => openSession(st.child) }, 'Open session'))
+      : st?.status === 'dismissed' ? h('div', { class: 'muted small' }, 'Dismissed.')
+      : h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: async () => {
+          try {
+            const child = await api('/api/proposals/start', { session: P.sid, id: p.id });
+            draw({ status: 'started', child: child.id });
+            loadSessions();
+            toast(`Started ${child.title}; it reports back here when done.`);
+          } catch (err) { toast(err.message, 6000); }
+        } }, 'Start session'),
+        h('button', { onclick: async () => {
+          try { await api('/api/proposals/dismiss', { session: P.sid, id: p.id }); draw({ status: 'dismissed' }); }
+          catch (err) { toast(err.message, 6000); }
+        } }, 'Dismiss')));
+  draw(status);
+  return card;
+}
+
+function reportCard(m) {
+  $('.welcome')?.remove();
+  const body = h('div', { class: 'md' });
+  body.innerHTML = mdRender(m.content || '');
+  $('#chat-log').append(h('div', { class: 'report' },
+    h('div', { class: 'p-head' }, h('span', { class: 'blk' }, '▣'), h('strong', {}, `Report from ${m.title}`),
+      h('button', { class: 'mini', onclick: () => openSession(m.session) }, 'Open session')), body));
+}
+
+function turnBlock(team, depth, llm) {
   const t = teamOf(team);
   const el = h('div', { class: 'turn' + (depth ? ' nested' : ''), style: { '--team': t.color } },
-    h('div', { class: 'turn-head' }, h('span', { class: 'dot', style: { background: t.color } }), t.name));
+    h('div', { class: 'turn-head' }, h('span', { class: 'dot', style: { background: t.color } }), t.name,
+      llm ? h('span', { class: 'llm-tag' }, llm) : null));
   const parent = depth && R.turns.length ? R.turns[0].el : $('#chat-log');
   parent.append(el);
   const turn = { team, depth, el };
@@ -468,7 +647,7 @@ function permissionCard(ev) {
   (R.turns.length ? R.turns[R.turns.length - 1].el : $('#chat-log')).append(card);
 }
 
-const DRAWN = new Set(['turn', 'text', 'retract', 'thinking', 'tool', 'tool_result', 'system', 'handoff', 'error']);
+const DRAWN = new Set(['turn', 'text', 'retract', 'thinking', 'tool', 'tool_result', 'system', 'handoff', 'error', 'proposal']);
 
 function handle(ev) {
   if (P.screen !== P.liveScreen) {
@@ -477,7 +656,8 @@ function handle(ev) {
     else if (DRAWN.has(ev.type)) { if (ev.type === 'turn') renderTeams(); return; }
   }
   switch (ev.type) {
-    case 'turn': endSegment(); turnBlock(ev.team, ev.depth); break;
+    case 'turn': endSegment(); turnBlock(ev.team, ev.depth, ev.llm); break;
+    case 'proposal': endSegment(); (R.turns.length ? R.turns[R.turns.length - 1].el : $('#chat-log')).append(proposalCard(ev)); break;
     case 'text': addText(ev.team, ev.depth, ev.delta); break;
     case 'retract':                       // the model wrote a tool call as text: show the text without it
       if (R.segment) { R.segment.text = ev.text; R.segment.el.innerHTML = mdRender(ev.text); if (!ev.text) R.segment.el.remove(); }
@@ -522,9 +702,14 @@ function replay(s) {
     const depth = m.depth && P.screen === m.team ? 0 : (m.depth || 0);
     if (m.role === 'user') { R.turns = []; userBubble(m.content, m.team, m.screen || 'main', m.attachments); }
     else if (m.role === 'handoff') { R.turns = []; handoffBubble(m); }
+    else if (m.role === 'report') { R.turns = []; reportCard(m); }
+    else if (m.role === 'proposal') {
+      const st = s.messages.find(x => x.role === 'proposal_status' && x.id === m.id);
+      (R.turns.length ? R.turns[R.turns.length - 1].el : $('#chat-log')).append(proposalCard(m, st));
+    }
     else if (m.role === 'system_note') note(m.content);
     else if (m.role === 'assistant') {
-      if (!R.turns.some(x => x.depth === depth && x.team === m.team)) turnBlock(m.team, depth);
+      if (!R.turns.some(x => x.depth === depth && x.team === m.team)) turnBlock(m.team, depth, m.llm);
       if (m.content) { R.segment = null; addText(m.team, depth, m.content); endSegment(); }
       for (const c of m.tool_calls || []) { let a = {}; try { a = JSON.parse(c.arguments); } catch { /* raw */ } addTool(m.team, depth, c.id, c.name, a); }
     } else if (m.role === 'tool') {
@@ -602,27 +787,52 @@ function autosize() {
   t.style.height = Math.min(t.scrollHeight, 220) + 'px';
   t.style.overflowY = t.scrollHeight > 220 ? 'auto' : 'hidden';
 }
-let hintItems = [], hintIndex = 0;
+// Hints under the message box: /commands at the start, and @ anywhere, like Claude Code: teams (at
+// the start), cells, this chat's uploads and recent runs. Picking one replaces the @word being typed.
+let hintItems = [], hintIndex = 0, hintSpan = null, mentionSeq = 0;
 function hideHint() { $('#hint').hidden = true; hintItems = []; }
-function showHint() {
-  const v = $('#input').value;
-  if (/^\/\S*$/.test(v)) hintItems = COMMANDS.filter(([c]) => c.startsWith(v.split(' ')[0])).map(([c, d]) => ({ k: c, d, ins: c.split(' ')[0] + ' ' }));
-  else if (/^@[a-z-]*$/.test(v)) hintItems = P.state.teams.filter(t => ('@' + t.id).startsWith(v)).map(t => ({ k: '@' + t.id, d: t.name, ins: '@' + t.id + ' ' }));
-  else return hideHint();
+function drawHint() {
   if (!hintItems.length) return hideHint();
   hintIndex = Math.min(hintIndex, hintItems.length - 1);
   $('#hint').replaceChildren(...hintItems.map((it, i) => h('button', { type: 'button', class: i === hintIndex ? 'hl' : '',
     onclick: () => pickHint(i) }, h('span', { class: 'k' }, it.k), h('span', { class: 'muted' }, it.d))));
   $('#hint').hidden = false;
 }
-function pickHint(i) { $('#input').value = hintItems[i].ins; hideHint(); $('#input').focus(); }
+async function showHint() {
+  const el = $('#input'), v = el.value, cur = el.selectionStart ?? v.length;
+  if (/^\/\S*$/.test(v)) {
+    hintSpan = [0, v.length];
+    hintItems = COMMANDS.filter(([c]) => c.startsWith(v.split(' ')[0])).map(([c, d]) => ({ k: c, d, ins: c.split(' ')[0] + ' ' }));
+    return drawHint();
+  }
+  const m = v.slice(0, cur).match(/(^|\s)@("[^"]*|[^\s@"]*)$/);
+  if (!m) return hideHint();
+  const q = m[2].replace(/^"/, ''), start = cur - m[2].length - 1;
+  hintSpan = [start, cur];
+  const seq = ++mentionSeq;
+  const teams = start === 0 ? P.state.teams.filter(t => t.id.startsWith(q)).map(t => ({ k: '@' + t.id, d: `send to ${t.name}`, ins: '@' + t.id + ' ' })) : [];
+  let found = [];
+  try { found = await api(`/api/mentions?session=${encodeURIComponent(P.sid || '')}&q=${encodeURIComponent(q)}`); } catch { /* offline */ }
+  if (seq !== mentionSeq) return;                // a newer keystroke already asked
+  hintItems = [...teams, ...found.map(f => ({ k: f.label, d: `${f.kind} · ${f.detail || ''}`, ins: f.insert + ' ' }))];
+  drawHint();
+}
+function pickHint(i) {
+  const el = $('#input'), [a, b] = hintSpan || [0, el.value.length];
+  el.value = el.value.slice(0, a) + hintItems[i].ins + el.value.slice(b);
+  el.selectionStart = el.selectionEnd = a + hintItems[i].ins.length;
+  hideHint();
+  el.focus();
+}
 
 $('#input').addEventListener('input', () => { autosize(); hintIndex = 0; showHint(); });
 $('#input').addEventListener('keydown', e => {
   if (hintItems.length && !$('#hint').hidden) {
     if (e.key === 'ArrowDown') { hintIndex = (hintIndex + 1) % hintItems.length; showHint(); e.preventDefault(); return; }
     if (e.key === 'ArrowUp') { hintIndex = (hintIndex + hintItems.length - 1) % hintItems.length; showHint(); e.preventDefault(); return; }
-    if (e.key === 'Tab') { pickHint(hintIndex); e.preventDefault(); return; }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && $('#input').value.slice(0, $('#input').selectionStart).match(/@\S*$/))) {
+      pickHint(hintIndex); e.preventDefault(); return;
+    }
     if (e.key === 'Escape') { hideHint(); return; }
   }
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#composer').requestSubmit(); }
@@ -644,6 +854,7 @@ async function pollLLM() {
     P.state = await api('/api/state');
     $('#ws-path').textContent = 'workspace ' + P.state.workspace;
     if (P.screen !== 'main' && !P.state.teams.some(t => t.id === P.screen)) P.screen = 'main';
+    await loadLLMs();
     const list = await loadSessions();
     if (P.sid && list.some(s => s.id === P.sid)) await openSession(P.sid);
     else if (list.length) await openSession(list[0].id);
@@ -653,6 +864,7 @@ async function pollLLM() {
     Probe.init();
     pollLLM();
     setInterval(pollLLM, 20000);
+    setInterval(loadLLMs, 20000);
     setInterval(refresh, 10000);
   } catch (err) {
     $('#llm-pill').className = 'pill bad';

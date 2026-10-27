@@ -79,8 +79,10 @@ const DE = (() => {
       tree.append(h('div', { class: 'lib' }, lib.name, h('span', { class: 'pdk' }, lib.pdk)));
       for (const c of lib.cells) {
         const key = `${lib.name}/${c.name}`;
-        tree.append(h('button', { class: 'cell' + (S.active?.startsWith(key + ':') ? ' active' : ''), title: c.views.join(', '),
-          onclick: () => open(lib.name, c.name, c.views.includes('schematic') ? 'schematic' : c.views[0] || 'schematic') },
+        tree.append(h('button', { class: 'cell' + (S.active?.startsWith(key + ':') ? ' active' : ''),
+          title: `${c.views.join(', ')}. Right-click: new session for this block`,
+          onclick: () => open(lib.name, c.name, c.views.includes('schematic') ? 'schematic' : c.views[0] || 'schematic'),
+          oncontextmenu: e => { e.preventDefault(); window.Studio?.newBlockSession(lib.name, c.name); } },
           c.name, h('span', { class: 'v' }, [c.testbench ? 'tb' : null, ...c.views.map(v => VIEW_SHORT[v])].filter(Boolean).join(' '))));
       }
     }
@@ -265,11 +267,13 @@ const DE = (() => {
     results: () => Probe.open(null),
     toggle_library: () => { S.display.library = !S.display.library; saveDisplay(); render(); },
     toggle_inspector: () => { S.display.inspector = !S.display.inspector; saveDisplay(); render(); },
+    new_block_session: () => { const v = view(); if (v) window.Studio?.newBlockSession(v.lib, v.cell); },
     cancel: () => { S.cmd = null; S.sel.clear(); S.selNotes.clear(); S.menuOpen = null; render(); },
     command_options: commandOptions,
   };
   const SCHEMATIC_ONLY = new Set(Object.keys(CMD).filter(k => !['new_cellview', 'open_cellview', 'close_view', 'display_options',
-    'editor_options', 'bindkeys', 'results', 'import_testchip', 'toggle_library', 'toggle_inspector', 'cancel', 'return', 'return_top', 'netlist'].includes(k)));
+    'editor_options', 'bindkeys', 'results', 'import_testchip', 'toggle_library', 'toggle_inspector', 'cancel', 'return', 'return_top', 'netlist',
+    'new_block_session'].includes(k)));
 
   async function run(id) {
     await opening;
