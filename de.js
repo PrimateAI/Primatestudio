@@ -238,7 +238,7 @@ const DE = (() => {
   const align = mode => needSel() && op('align', { names: names(), mode });
 
   const CMD = {
-    new_cellview: newCell, open_cellview: openDialog, close_view: () => Apps.close(Apps.active),
+    new_cellview: newCell, open_cellview: openDialog, close_view: () => Apps.close(Apps.active), import_testchip: importTestchip,
     check_and_save: () => checkCell(true), export_svg: exportSvg,
     undo: () => op('undo'), redo: () => op('redo'),
     copy: () => needSel() && startMove('copy'), move: () => needSel() && startMove('move'), stretch: () => needSel() && startMove('stretch'),
@@ -269,7 +269,7 @@ const DE = (() => {
     command_options: commandOptions,
   };
   const SCHEMATIC_ONLY = new Set(Object.keys(CMD).filter(k => !['new_cellview', 'open_cellview', 'close_view', 'display_options',
-    'editor_options', 'bindkeys', 'results', 'toggle_library', 'toggle_inspector', 'cancel', 'return', 'return_top', 'netlist'].includes(k)));
+    'editor_options', 'bindkeys', 'results', 'import_testchip', 'toggle_library', 'toggle_inspector', 'cancel', 'return', 'return_top', 'netlist'].includes(k)));
 
   async function run(id) {
     await opening;
@@ -652,6 +652,11 @@ const DE = (() => {
   // ------------------------------------------------------------ forms (Create, Edit)
   function paramInputs(master, values = {}) {
     const d = devs()[master];
+    if (!d) {                                   // a cell: its parameters, blank = the cell's default
+      const cp = view()?.data?.symbols?.[master]?.params || {};
+      return Object.keys(cp).map(k => [k, h('input', { type: 'text', value: values[k] ?? '', placeholder: `default ${cp[k]}`,
+        title: 'number, or an expression of this cell\'s parameters' })]);
+    }
     return Object.keys(d?.params || {}).map(k => [k, h('input', { type: 'text', value: values[k] ?? d.params[k] ?? '',
       placeholder: k === 'l' ? 'PDK minimum' : '', title: d.units?.[k] || '' })]);
   }
@@ -971,8 +976,22 @@ const DE = (() => {
   }
 
   // ------------------------------------------------------------ testbench + simulate
-  const FIELDS = { op: [], tran: ['step', 'stop', 'start'], ac: ['sweep', 'points', 'fstart', 'fstop'], dc: ['source', 'start', 'stop', 'step'] };
+  const FIELDS = { op: [], tran: ['step', 'stop', 'start', 'max'], ac: ['sweep', 'points', 'fstart', 'fstop'], dc: ['source', 'start', 'stop', 'step'] };
   const DEFAULTS = { tran: { step: '1p', stop: '10n' }, ac: { sweep: 'dec', points: 20, fstart: '1', fstop: '10g' }, dc: { start: '0', stop: '1.8', step: '0.01' }, op: {} };
+
+  async function importTestchip() {
+    const pdk = h('select', {}, P.state.pdks.map(p => h('option', { value: p.id, selected: p.id === 'sky130' }, `${p.id} · ${p.label}`)));
+    const replace = h('input', { type: 'checkbox' });
+    if (!await modal('Import TX Test Chip', [h('p', { class: 'muted small' }, 'The test chip\'s analog path (CML slice, 16-slice main tap, ' +
+      'mux, pre-driver, bias) and its testbenches tb_cml_slice and tb_tx_2g, sized for the chosen PDK, as library tx_<pdk>.'),
+      h('div', { class: 'row' }, 'PDK', pdk), h('label', { class: 'row' }, replace, 'Rebuild if the library exists (undo keeps the old cells)')], 'Import')) return;
+    try {
+      const r = await api('/api/import_tx', { pdk: pdk.value, replace: replace.checked });
+      toast(`Imported ${r.lib}: ${r.cells.length} cells, ${r.testbenches.length} testbenches`, 5000);
+      await loadLibs();
+      open(r.lib, 'tb_tx_2g');
+    } catch (err) { toast(err.message, 6000); }
+  }
 
   async function testbenchDialog() {
     const v = view();
@@ -991,9 +1010,11 @@ const DE = (() => {
     const pdk = h('select', {}, h('option', { value: '' }, `library PDK (${v.data.pdk})`), P.state.pdks.filter(p => p.installed).map(p => h('option', { value: p.id, selected: p.id === sim.pdk }, p.id)));
     const corner = h('select', {}, P.state.corners.map(c => h('option', { value: c, selected: c === (sim.corner || 'tt') }, c)));
     const temp = h('input', { type: 'number', value: sim.temp ?? 27, style: { width: '70px' } });
+    const save = h('input', { type: 'text', value: (sim.save || []).join(' '), placeholder: 'all signals', title: 'e.g. v(out) v(x1.tail) i(vdd)' });
     if (!await modal(`Testbench: ${v.lib}/${v.cell}`, [list, h('button', { class: 'mini', onclick: () => { sim.analyses.push({ type: 'tran', ...DEFAULTS.tran }); draw(); } }, '+ analysis'),
-      h('div', { class: 'row' }, 'PDK', pdk, 'corner', corner, 'temp °C', temp)], 'Save')) return;
-    await op('set_sim', { analyses: sim.analyses, pdk: pdk.value || undefined, corner: corner.value, temp: +temp.value });
+      h('div', { class: 'row' }, 'PDK', pdk, 'corner', corner, 'temp °C', temp), h('label', { class: 'kv' }, 'save only', save)], 'Save')) return;
+    const saveList = save.value.trim() ? save.value.trim().split(/\s+/) : undefined;
+    await op('set_sim', { analyses: sim.analyses, pdk: pdk.value || undefined, corner: corner.value, temp: +temp.value, save: saveList });
   }
 
   async function simulateDialog() {

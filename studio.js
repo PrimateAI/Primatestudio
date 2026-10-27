@@ -80,10 +80,13 @@ function mdRender(md) {
 }
 
 // ---------------------------------------------------------------- state
-const P = { state: null, sid: store.get('session', null), session: null, controller: null };
+// screen: 'main' (the session chat) or a team id (that member's own chat); liveScreen: where the
+// running turn was sent from
+const P = { state: null, sid: store.get('session', null), session: null, controller: null,
+  screen: store.get('screen', 'main'), liveScreen: null };
 const teamOf = id => P.state?.teams.find(t => t.id === id) || { id, name: id, color: '#888' };
 const COMMANDS = [
-  ['/help', 'list commands'], ['/teams', 'list the teams'], ['/team <id>', 'talk to a team by default'],
+  ['/help', 'list commands'], ['/teams', 'list the teams'], ['/team <id>', 'who answers the session chat'],
   ['/memory [scope]', 'show memory'], ['/remember [scope] <text>', 'save a memory'], ['/forget <scope> <name>', 'delete a memory'],
   ['/open <lib>/<cell> [view]', 'open a view in Primate DE'], ['/sim <lib>/<cell> [pdk] [corner]', 'run PrimeSpice'],
   ['/clear', 'start a fresh context'],
@@ -148,12 +151,66 @@ async function loadSessions() {
   return list;
 }
 
+// ---------------------------------------------------------------- screens
+// A message shows on the screen it was typed on; a member's chat also shows everything addressed to
+// that member (@tags from other screens, tasks handed to it), from where its chat was last cleared.
+function onScreen(m, i, scr, s = P.session) {
+  const where = m.screen || 'main';
+  if (scr === 'main') return where === 'main' && m.role !== 'handoff';
+  if (i < (s.cleared?.[scr] || 0)) return false;
+  if (m.role === 'handoff') return m.team === scr;
+  return where === scr || m.team === scr;
+}
+
+// replies on a chat's own screen that arrived while the designer was looking at another chat (a
+// reply to a message typed elsewhere was already read where it was typed)
+function unread(scr) {
+  const s = P.session;
+  if (!s || scr === P.screen) return 0;
+  const seen = store.get(`seen.${s.id}`, {})[scr] ?? s.messages.length;
+  return s.messages.reduce((n, m, i) => n + (i >= seen && m.role === 'assistant' && m.content &&
+    (m.screen || 'main') === scr && onScreen(m, i, scr) ? 1 : 0), 0);
+}
+
+function markSeen() {
+  if (!P.session) return;
+  const seen = store.get(`seen.${P.session.id}`, {}), n = P.session.messages.length;
+  for (const scr of ['main', ...P.state.teams.map(t => t.id)]) seen[scr] ??= n;    // first visit: nothing is new
+  seen[P.screen] = n;
+  store.set(`seen.${P.session.id}`, seen);
+}
+
+function switchScreen(scr) {
+  if (scr !== 'main' && !P.state.teams.some(t => t.id === scr)) scr = 'main';
+  P.screen = scr;
+  store.set('screen', scr);
+  markSeen();
+  renderTeams();
+  if (P.session) replay(P.session);
+  $('#input').focus();
+}
+
 function renderTeams() {
-  const cur = P.session?.team;
-  $('#team-list').replaceChildren(...P.state.teams.map(t => h('button', {
-    class: 'team' + (t.id === cur ? ' active' : ''), title: t.mission, onclick: () => send(`/team ${t.id}`) },
-    h('span', { class: 'dot', style: { background: t.color } }), t.name)));
+  const cur = P.session?.team || 'lead';
+  const item = (id, label, color, title) => {
+    const n = unread(id);
+    return h('button', { class: 'team' + (id === P.screen ? ' active' : ''), title, onclick: () => switchScreen(id) },
+      h('span', { class: 'dot', style: { background: color } }), h('span', { class: 't' }, label),
+      n ? h('span', { class: 'badge', title: `${n} new` }, n) : null);
+  };
+  $('#team-list').replaceChildren(
+    item('main', 'Session chat', 'var(--muted)', `The session's own chat, answered by ${teamOf(cur).name}; @tag a team to bring it in`),
+    ...P.state.teams.map(t => item(t.id, t.name, t.color, `${t.name}'s own chat. ${t.mission}`)));
   $('#team-select').replaceChildren(...P.state.teams.map(t => h('option', { value: t.id, selected: t.id === cur }, t.name)));
+  const main = P.screen === 'main', t = teamOf(P.screen);
+  $('#team-select').closest('label').hidden = !main;
+  $('#chat-head').replaceChildren(h('span', { class: 'dot', style: { background: main ? 'var(--muted)' : t.color } }),
+    h('strong', {}, main ? 'Session chat' : t.name),
+    h('span', { class: 'muted small' }, main
+      ? ` · answered by ${teamOf(cur).name}; @team brings one team in, and only that team sees the message`
+      : ' · private chat; this team sees only what is sent here, @tagged to it, or handed to it'));
+  $('#input').placeholder = main ? 'Message the session…  (@team to address one, / for commands)'
+    : `Message ${t.name}…  (@team to send to another team instead)`;
 }
 
 async function loadMemory() {
@@ -198,6 +255,7 @@ async function openSession(sid) {
   P.session = await api('/api/sessions/' + sid);
   P.sid = sid;
   store.set('session', sid);
+  markSeen();
   renderTeams();
   loadSessions();
   replay(P.session);
@@ -209,6 +267,14 @@ $('#team-select').addEventListener('change', e => send(`/team ${e.target.value}`
 const R = { turns: [], segment: null, tools: {}, thinking: null };
 
 function welcome() {
+  if (P.screen !== 'main') {
+    const t = teamOf(P.screen);
+    $('#chat-log').replaceChildren(h('div', { class: 'welcome' },
+      h('h2', {}, t.name), h('p', { class: 'muted' }, t.mission),
+      h('p', { class: 'muted small' }, `Messages you send here go to ${t.name} only. Messages @tagged to ` +
+        `@${t.id} from the session chat or another team's chat, and tasks other teams hand to it, show up here too.`)));
+    return;
+  }
   $('#chat-log').replaceChildren(h('div', { class: 'welcome' },
     h('h2', {}, 'What are we designing?'),
     h('p', { class: 'muted' }, 'Talk to the Lead, or address a team with @analog-schematic, @digital-logic, @analog-layout, ' +
@@ -219,9 +285,18 @@ function welcome() {
 
 function scrollDown() { const l = $('#chat-log'); l.scrollTop = l.scrollHeight; }
 
-function userBubble(text, team) {
+// a user message as seen on the current screen: "to X" where it was typed, "from <screen>" elsewhere
+function userBubble(text, team, where = P.screen) {
   $('.welcome')?.remove();
-  $('#chat-log').append(h('div', { class: 'msg-user' }, h('span', { class: 'to' }, 'to ' + teamOf(team).name), text));
+  const label = where !== P.screen ? `@${team} from ${where === 'main' ? 'the session chat' : teamOf(where).name + "'s chat"}`
+    : P.screen !== 'main' && team === P.screen ? null : 'to ' + teamOf(team).name;
+  $('#chat-log').append(h('div', { class: 'msg-user' }, label ? h('span', { class: 'to' }, label) : null, text));
+}
+
+function handoffBubble(m) {
+  $('.welcome')?.remove();
+  $('#chat-log').append(h('div', { class: 'msg-handoff' },
+    h('span', { class: 'to' }, `handed off by ${teamOf(m.from).name}`), m.task));
 }
 
 function turnBlock(team, depth) {
@@ -294,7 +369,14 @@ function permissionCard(ev) {
   (R.turns.length ? R.turns[R.turns.length - 1].el : $('#chat-log')).append(card);
 }
 
+const DRAWN = new Set(['turn', 'text', 'retract', 'thinking', 'tool', 'tool_result', 'system', 'handoff', 'error']);
+
 function handle(ev) {
+  if (P.screen !== P.liveScreen) {
+    // the designer moved to another chat while this turn runs: it is redrawn from the session when done
+    if (ev.type === 'permission') { switchScreen(P.liveScreen); toast('A team is asking for approval here.'); }
+    else if (DRAWN.has(ev.type)) { if (ev.type === 'turn') renderTeams(); return; }
+  }
   switch (ev.type) {
     case 'turn': endSegment(); turnBlock(ev.team, ev.depth); break;
     case 'text': addText(ev.team, ev.depth, ev.delta); break;
@@ -334,15 +416,18 @@ function replay(s) {
   R.turns = []; R.segment = null; R.tools = {}; R.thinking = null;
   const log = $('#chat-log');
   log.replaceChildren();
-  if (!s.messages.length) { welcome(); return; }
-  for (const m of s.messages) {
-    if (m.role === 'user') { R.turns = []; userBubble(m.content, m.team); }
+  const shown = s.messages.filter((m, i) => onScreen(m, i, P.screen, s));
+  if (!shown.length) { welcome(); return; }
+  for (const m of shown) {
+    // work a team did on a task handed to it is its own top-level turn in its own chat
+    const depth = m.depth && P.screen === m.team ? 0 : (m.depth || 0);
+    if (m.role === 'user') { R.turns = []; userBubble(m.content, m.team, m.screen || 'main'); }
+    else if (m.role === 'handoff') { R.turns = []; handoffBubble(m); }
     else if (m.role === 'system_note') note(m.content);
     else if (m.role === 'assistant') {
-      const t = R.turns.find(x => x.depth === (m.depth || 0) && x.team === m.team) || turnBlock(m.team, m.depth || 0);
-      if (m.content) { R.segment = null; addText(m.team, m.depth || 0, m.content); endSegment(); }
-      for (const c of m.tool_calls || []) { let a = {}; try { a = JSON.parse(c.arguments); } catch { /* raw */ } addTool(m.team, m.depth || 0, c.id, c.name, a); }
-      void t;
+      if (!R.turns.some(x => x.depth === depth && x.team === m.team)) turnBlock(m.team, depth);
+      if (m.content) { R.segment = null; addText(m.team, depth, m.content); endSegment(); }
+      for (const c of m.tool_calls || []) { let a = {}; try { a = JSON.parse(c.arguments); } catch { /* raw */ } addTool(m.team, depth, c.id, c.name, a); }
     } else if (m.role === 'tool') {
       let summary = m.content;
       try { const o = JSON.parse(m.content); summary = o.error ? 'error: ' + o.error : m.content.slice(0, 220); } catch { /* text */ }
@@ -361,14 +446,16 @@ async function send(text) {
   autosize();
   hideHint();
   const m = text.match(/^@([a-z-]+)\s/);
-  if (!text.startsWith('/')) userBubble(m ? text.slice(m[0].length) : text, m ? m[1] : P.session.team);
+  const here = P.screen === 'main' ? P.session.team || 'lead' : P.screen;
+  if (!text.startsWith('/')) userBubble(m ? text.slice(m[0].length) : text, m ? m[1] : here);
   R.turns = [];
+  P.liveScreen = P.screen;
   P.controller = new AbortController();
   $('#send').textContent = 'Stop';
   $('#send').classList.remove('primary');
   try {
     const r = await fetch(API + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: P.controller.signal,
-      body: JSON.stringify({ session: P.sid, text, think: $('#think').checked, open: DE.currentLabel() }) });
+      body: JSON.stringify({ session: P.sid, text, think: $('#think').checked, open: DE.currentLabel(), screen: P.screen }) });
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = '';
     for (;;) {
@@ -388,6 +475,9 @@ async function send(text) {
     $('#send').classList.add('primary');
     $('#status').textContent = '';
     P.session = await api('/api/sessions/' + P.sid).catch(() => P.session);
+    if (P.screen !== P.liveScreen) replay(P.session);
+    P.liveScreen = null;
+    markSeen();
     renderTeams();
     loadSessions();
     $('#input').focus();
@@ -442,6 +532,7 @@ async function pollLLM() {
   try {
     P.state = await api('/api/state');
     $('#ws-path').textContent = 'workspace ' + P.state.workspace;
+    if (P.screen !== 'main' && !P.state.teams.some(t => t.id === P.screen)) P.screen = 'main';
     const list = await loadSessions();
     if (P.sid && list.some(s => s.id === P.sid)) await openSession(P.sid);
     else if (list.length) await openSession(list[0].id);
