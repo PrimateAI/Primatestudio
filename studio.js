@@ -255,12 +255,35 @@ async function openSession(sid) {
   P.session = await api('/api/sessions/' + sid);
   P.sid = sid;
   store.set('session', sid);
+  // land on a chat that has something: the one the session's latest message was typed in
+  const msgs = P.session.messages;
+  if (msgs.length && !msgs.some((m, i) => onScreen(m, i, P.screen))) {
+    const last = [...msgs].reverse().find(m => m.role === 'user');
+    P.screen = last ? last.screen || 'main' : 'main';
+    store.set('screen', P.screen);
+  }
   markSeen();
   renderTeams();
   loadSessions();
   replay(P.session);
 }
 $('#new-session').addEventListener('click', newSession);
+
+// Turns also run from other pages (the hosted copy, another device, an agent), so while idle the
+// page re-reads the session list and the open session and redraws when something changed.
+async function refresh() {
+  if (P.controller || !P.sid || document.hidden) return;
+  try {
+    await loadSessions();
+    const s = await api('/api/sessions/' + P.sid);
+    if (P.controller || s.messages.length === P.session?.messages.length) return;
+    P.session = s;
+    replay(s);
+    markSeen();
+    renderTeams();
+  } catch { /* engine offline: the model pill says so */ }
+}
+window.addEventListener('focus', refresh);
 $('#team-select').addEventListener('change', e => send(`/team ${e.target.value}`));
 
 // ---------------------------------------------------------------- chat rendering
@@ -542,6 +565,7 @@ async function pollLLM() {
     Probe.init();
     pollLLM();
     setInterval(pollLLM, 20000);
+    setInterval(refresh, 10000);
   } catch (err) {
     $('#llm-pill').className = 'pill bad';
     $('#llm-pill').textContent = 'engine offline';
