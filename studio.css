@@ -81,6 +81,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-weak
 .chat-head { display: flex; align-items: center; gap: 8px; padding: 8px 18px; border-bottom: 1px solid var(--border); font-size: 13px; min-height: 36px; }
 .chat-head .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session.nested { padding-left: 22px; }
+.working { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; padding: 6px 2px; }
 .session .blk, .proposal .blk, .report .blk { color: var(--accent); font-size: 12px; }
 .spin { width: 9px; height: 9px; flex: none; border-radius: 50%; border: 2px solid var(--accent); border-right-color: transparent; animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -141,6 +141,7 @@ $('#app-probe').addEventListener('click', () => Probe.open(null));
 // them; a spinner marks one that is working on its own.
 async function loadSessions() {
   const list = await api('/api/sessions');
+  P.running = new Set(list.filter(s => s.running).map(s => s.id));
   const ids = new Set(list.map(s => s.id)), kids = {};
   for (const s of list) if (s.parent && ids.has(s.parent)) (kids[s.parent] ||= []).push(s);
   const row = (s, nested) => h('button', {
@@ -360,7 +361,9 @@ $('#mem-add').addEventListener('click', async () => {
 
 // ---------------------------------------------------------------- sessions
 async function newSession() {
-  const s = await api('/api/sessions', { team: P.session?.team || 'lead' });
+  const s = await api('/api/sessions', { team: 'lead' });       // a new session always starts with the Lead
+  P.screen = 'main';
+  store.set('screen', 'main');
   await openSession(s.id);
 }
 
@@ -387,9 +390,10 @@ $('#new-session').addEventListener('click', newSession);
 async function refresh() {
   if (P.controller || !P.sid || document.hidden) return;
   try {
+    const was = P.running?.has(P.sid);
     await loadSessions();
     const s = await api('/api/sessions/' + P.sid);
-    if (P.controller || s.messages.length === P.session?.messages.length) return;
+    if (P.controller || (s.messages.length === P.session?.messages.length && was === P.running.has(P.sid))) return;
     P.session = s;
     replay(s);
     markSeen();
@@ -718,6 +722,9 @@ function replay(s) {
       toolDone(m.tool_call_id, m.ok !== false, summary);
     }
   }
+  if (!P.controller && P.running?.has(s.id))    // a turn started elsewhere (another tab, device, or a block brief)
+    $('#chat-log').append(h('div', { class: 'working' }, h('span', { class: 'spin' }),
+      ' Working… the local model is reading and thinking; this chat fills in as each step finishes.'));
   scrollDown();
 }
 
